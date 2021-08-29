@@ -1,6 +1,8 @@
+use axum::async_trait;
 use axum::body::{Bytes, Full};
+use axum::extract::FromRequest;
 use axum::response::IntoResponse;
-use axum::{extract::Path, handler::get, response::Html, routing::BoxRoute, Json, Router};
+use axum::{handler::get, response::Html, routing::BoxRoute, Json, Router};
 use chrono::format::ParseError;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use hyper::StatusCode;
@@ -40,27 +42,11 @@ async fn hello_handler() -> Html<&'static str> {
     Html("<h1>Hello World!</h1>")
 }
 
-async fn date_handler(Path(mut date): Path<String>) -> Result<Json<Value>, AppError> {
-    tracing::info!("Provided date is {}", date);
-    let timestamp = date.parse::<i64>();
-    if timestamp.is_ok() {
-        let timestamp = timestamp.unwrap();
-        let ndt = NaiveDateTime::from_timestamp(timestamp, 0);
-        date = ndt.format("%Y-%m-%d").to_string();
-        tracing::debug!(
-            "We converted from the original timestamp {} to the following date {}",
-            timestamp,
-            date
-        );
-    }
-
-    let date: NaiveDate = date.parse()?;
-    let date = DateTime::<Utc>::from_utc(date.and_hms(0, 0, 0), Utc);
-
-    tracing::debug!("Converted date is {}", date);
+async fn date_handler(date: ExtractDate) -> Result<Json<Value>, AppError> {
+    tracing::info!("Provided date is {:?}", date);
     Ok(Json(json!({
-        "unix": date.timestamp(),
-        "utc": date.to_rfc2822(),
+        "unix": date.0.timestamp(),
+        "utc": date.0.to_rfc2822(),
     })))
 }
 
@@ -70,6 +56,45 @@ async fn now_handler() -> Result<Json<Value>, AppError> {
         "unix": utc.timestamp(),
         "utc": utc.to_rfc2822(),
     })))
+}
+
+#[derive(Debug)]
+struct ExtractDate(DateTime<Utc>);
+
+#[async_trait]
+impl<B> FromRequest<B> for ExtractDate
+where
+    B: Send,
+{
+    type Rejection = AppError;
+
+    async fn from_request(
+        req: &mut axum::extract::RequestParts<B>,
+    ) -> Result<Self, Self::Rejection> {
+        let path = req.uri().path();
+        tracing::debug!("path is {}", path);
+        let v = path
+            .split('/')
+            .collect::<Vec<&str>>()
+            .pop()
+            .ok_or_else(|| AppError)?;
+
+        let mut v = String::from(v);
+        let timestamp = v.parse::<i64>();
+        if timestamp.is_ok() {
+            let timestamp = timestamp.unwrap();
+            let ndt = NaiveDateTime::from_timestamp(timestamp, 0);
+            v = ndt.format("%Y-%m-%d").to_string();
+            tracing::debug!(
+                "We converted from the original timestamp {} to the following date {}",
+                timestamp,
+                v
+            );
+        }
+
+        let date: NaiveDate = v.parse()?;
+        Ok(Self(DateTime::<Utc>::from_utc(date.and_hms(0, 0, 0), Utc)))
+    }
 }
 
 struct AppError;
@@ -86,7 +111,7 @@ impl IntoResponse for AppError {
     type BodyError = Infallible;
 
     fn into_response(self) -> hyper::Response<Self::Body> {
-        let status = StatusCode::UNPROCESSABLE_ENTITY;
+        let status = StatusCode::INTERNAL_SERVER_ERROR;
         let body = Json(json!({
             "error": "Invalid Date"
         }));
@@ -207,7 +232,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
         let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
         let body: Value = serde_json::from_slice(&body).unwrap();
