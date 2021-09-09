@@ -1,5 +1,6 @@
 use axum::async_trait;
 use axum::body::{Bytes, Full};
+use axum::extract::rejection::PathParamsRejection;
 use axum::extract::FromRequest;
 use axum::response::IntoResponse;
 use axum::{handler::get, response::Html, routing::BoxRoute, Json, Router};
@@ -71,28 +72,22 @@ where
     async fn from_request(
         req: &mut axum::extract::RequestParts<B>,
     ) -> Result<Self, Self::Rejection> {
-        let path = req.uri().path();
-        tracing::debug!("path is {}", path);
-        let v = path
-            .split('/')
-            .collect::<Vec<&str>>()
-            .pop()
-            .ok_or_else(|| AppError)?;
-
-        let mut v = String::from(v);
-        let timestamp = v.parse::<i64>();
-        if timestamp.is_ok() {
-            let timestamp = timestamp.unwrap();
-            let ndt = NaiveDateTime::from_timestamp(timestamp, 0);
-            v = ndt.format("%Y-%m-%d").to_string();
+        let mut input = axum::extract::Path::<String>::from_request(req).await?.0;
+        tracing::debug!("path is {}", input);
+        let as_timestamp = input.parse::<i64>();
+        // convert from timestamp to y-m-d string.
+        if as_timestamp.is_ok() {
+            let as_timestamp = as_timestamp.unwrap();
+            let ndt = NaiveDateTime::from_timestamp(as_timestamp, 0);
+            input = ndt.format("%Y-%m-%d").to_string();
             tracing::debug!(
                 "We converted from the original timestamp {} to the following date {}",
-                timestamp,
-                v
+                as_timestamp,
+                input
             );
         }
 
-        let date: NaiveDate = v.parse()?;
+        let date: NaiveDate = input.parse()?;
         Ok(Self(DateTime::<Utc>::from_utc(date.and_hms(0, 0, 0), Utc)))
     }
 }
@@ -102,6 +97,13 @@ struct AppError;
 impl From<ParseError> for AppError {
     fn from(error: ParseError) -> Self {
         tracing::error!("Error while parsing the date: {}", error);
+        AppError
+    }
+}
+
+impl From<PathParamsRejection> for AppError {
+    fn from(error: PathParamsRejection) -> Self {
+        tracing::error!("Error while parsing path: {}", error);
         AppError
     }
 }
